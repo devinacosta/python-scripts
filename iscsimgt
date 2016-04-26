@@ -1,0 +1,167 @@
+#!/usr/bin/env python2.7
+"""Usage: 
+    iscsimgt display
+    iscsimgt delete <ip>
+    iscsimgt login <ip>
+    iscsimgt logout <ip>
+    iscsimgt (-h | --help | --version)
+
+Example:
+    iscsimgt display		  (Displays iSCSI information)
+    iscsimgt login 10.141.0.100   (Login IP 10.141.0.100 into SAN)
+    iscsimgt logout 10.141.0.100  (Logout IP 10.141.0.100 from SAN)
+"""
+
+from docopt import docopt
+from blessings import Terminal
+from configobj import ConfigObj
+import os
+import re
+import shlex
+import subprocess
+import sys
+import StringIO
+
+def runcmd(cmd):
+        args = shlex.split(cmd)
+        getoutput = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = getoutput.stdout.readlines()
+        getoutput.wait()
+        cmdoutput = getoutput.communicate()
+        cmdoutput_stdout = cmdoutput[0]
+        cmdoutput_stderr = cmdoutput[1]
+        returncode_plun = getoutput.returncode
+        return output, cmdoutput_stderr, returncode_plun
+
+def iscsi_nodes():
+    nodes = {}
+    iscsi_nodes = os.listdir('/var/lib/iscsi/nodes')
+    for node in iscsi_nodes:
+        node_dirs = os.listdir('/var/lib/iscsi/nodes/'+node)
+        node_dir = node_dirs[0]
+        ip, port, val = node_dir.split(",")
+        sanport = node.split(".")[-1:][0]
+        nodes[ip] = { 'port': port, 'value': val, 'sanport': sanport, 'loggedin': False, 'iqn': node }
+    session_out, session_error, session_retcode = runcmd('iscsiadm -m session')
+    for session in session_out:
+        #tcp: [1] 10.141.28.200:3260,1 iqn.1994-04.jp.co.hitachi:rsd.d9m.t.40361.0a0c9\n
+        my_session = session.split(",")[0]
+        my_session = session.split(" ")[2]
+        my_session = my_session.replace(":3260,1","")
+        nodes[my_session].update({'loggedin': True })
+    return nodes
+
+def getiqn():
+    config = ConfigObj("/etc/iscsi/initiatorname.iscsi")
+    iqn = config['InitiatorName']
+    text = "{t.normal}IQN: {t.bold}"+iqn+"{t.normal}"
+    return text
+
+def getsandisp():
+    config = ConfigObj("/usr/local/sbin/san.cfg")
+    return config 
+
+def display_nodes(nodes):
+    iqn = getiqn()
+    print("")
+    print(iqn).format(t=t)
+    print("")
+    template = "{0:^15}|{1:^20}|{2:^15}|{3:^20}"
+    print template.format("SAN","IP","SAN PORT","STATUS")
+    print template.format("-"*15,"-"*20,"-"*15,"-"*20)
+    length = len(nodes) 
+    if (length == 0):
+        print("No iSCSI Targets Found on System!")
+    else:
+        for node in sorted(nodes.iteritems()):
+	    # ('10.141.28.200', {'sanport': '0a0c9', 'loggedin': True, 'port': '3260', 'value': '1'})
+            ip = node[0]
+            attrs = node[1]
+            sanport = attrs['sanport']
+            sanport_brief = sanport[:2]
+            sanport_disp = " ("+str(sanport_brief)+") "+str(sanport)
+            sdisp = saninf[ip]
+        
+            loggedin = attrs['loggedin']
+            if(loggedin == 1):
+                status = "       {t.green}ONLINE{t.normal}"
+            else:
+                status = "       {t.red}OFFLINE{t.normal}"
+
+            # Print Output (make pretty)
+            print template.format(sdisp,ip,sanport_disp,status).format(t=t)
+
+        print template.format("-"*10,"-"*20,"-"*15,"-"*20).format(t=t)
+        print("")
+
+def delete_target(target,nodes):
+    """Delete a Target"""
+    t = Terminal()
+    
+    # Check to make sure target exists other-wise give error
+    if target not in nodes:
+        str = "ERROR: Nothing to delete for: "+target
+        print(str)
+        sys.exit()
+    mtarget = nodes[target]
+
+    # Find out if the target is logged in
+    if (mtarget['loggedin'] == True):
+        logout_target(target) # Logout port
+        delete = True# Delete port
+    else:
+        delete = True
+
+    if delete == True: 
+        my_target = mtarget['iqn']
+        cmd = "/sbin/iscsiadm -m node --target "+my_target+" -o delete"
+        output, error, returncode = runcmd(cmd)
+        if returncode == 0:
+            str = "{t.white}Deleting Portal {t.cyan}"+target+":3260.... {t.green}SUCCESS!{t.normal}"
+            print(str.format(t=t)) 
+
+
+def logout_target(target):
+    t = Terminal()
+    """Log-out a Target"""
+    cmd = "/sbin/iscsiadm -m node -p "+ target +":3260 -u"
+    output, error, retcode = runcmd(cmd)
+    if retcode == 0:
+        str = "{t.white}Logging off portal {t.cyan}"+target+":3260.... {t.green}SUCCESS!{t.normal}"
+        print(str.format(t=t)) 
+    else:
+        print("An Error has occured, tried to log off target",target)
+
+def login_target(target,nodes):
+    t = Terminal()
+    """Log-in a Target"""
+    
+    ## Find out first if IP is already registered with box if so we can just login (very simple)
+    if target in nodes:
+        cmd = "/sbin/iscsiadm -m node -p"+ target +":3260 -l"
+        output, error, retcode = runcmd(cmd)
+        if retcode == 0:
+            str = "{t.white}Logging in portal {t.cyan}"+target+":3260.... {t.green}SUCCESS!{t.normal}"
+            print(str.format(t=t))
+    else:
+        cmd = "/sbin/iscsiadm -m discovery -t st -p "+ target +":3260 -l"
+        output, error, retcode = runcmd(cmd) 
+        mytarget = "mytarget"
+        str = "{t.white}Logging in portal {t.cyan}"+target+":3260.... {t.green}SUCCESS!{t.normal}"
+        print(str.format(t=t))
+
+## Main Part of Script
+if __name__ == '__main__':
+    saninf = getsandisp()
+    t = Terminal()
+    arguments = docopt(__doc__, version="1.0.1")
+    nodes = iscsi_nodes()
+    #print(nodes)
+    if (arguments['display'] == True):	
+        display_nodes(nodes) 
+    if (arguments['login'] == True and arguments['logout'] == False ):
+        login_target(arguments['<ip>'],nodes) 
+    if (arguments['logout'] == True and arguments['login'] == False):
+        logout_target(arguments['<ip>']) 
+    if (arguments['delete'] == True):
+	delete_target(arguments['<ip>'],nodes)

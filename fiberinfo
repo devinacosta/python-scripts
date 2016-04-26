@@ -1,0 +1,49 @@
+#!/bin/env python2.7
+""" Shows Fibre Channel Information
+Written by Devin Acosta (devin@linuxguru.co)
+"""
+
+from __future__ import print_function
+import os
+
+def readfile(file):
+  f = open(file)
+  data = f.read().strip()
+  f.close()
+  return data
+
+def human(number):
+ num = "{:,}".format(number)
+ return num
+
+try:
+  fchostdir = os.listdir('/sys/class/fc_host')
+except OSError, msg:
+  print("No Fibre Channel Cards detected on system!")
+  exit()
+
+for fbhost in fchostdir:
+  port_state = readfile('/sys/class/fc_host/'+fbhost+'/port_state')
+  speed = readfile('/sys/class/fc_host/'+fbhost+'/speed')
+  port_name = readfile('/sys/class/fc_host/'+fbhost+'/port_name')
+  type = readfile('/sys/class/fc_host/'+fbhost+'/symbolic_name')
+  rx_frames = readfile('/sys/class/fc_host/'+fbhost+'/statistics/rx_frames')
+  tx_frames = readfile('/sys/class/fc_host/'+fbhost+'/statistics/tx_frames')
+
+  rx_human = human(int(rx_frames,0))
+  tx_human = human(int(tx_frames,0))
+
+  # Format WWN to be more human readable
+  port_name = port_name[2:]
+  human_wwn = ':'.join(port_name[i:i+2] for i in range(0, len(port_name), 2))
+
+
+  print("{0:-^50}".format("Fibre Channel Card"))
+  print("{0:<15} {1:<15}".format("Type:", type))
+  print("{0:<15} {1:<15}".format("WWN:", human_wwn))
+  print("{0:<15} {1:<15}".format("Port State:", port_state))
+  print("{0:<15} {1:<15}".format("Port Speed:", speed))
+  print("{0:<15} {1:<15}".format("RX Frames:", rx_human))
+  print("{0:<15} {1:<15}".format("TX Frames:", tx_human))
+  print("-"*50)
+

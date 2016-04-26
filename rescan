@@ -1,0 +1,335 @@
+#!/bin/env python2.7
+
+from __future__ import print_function
+import commands, os, re, shlex, string, sys, subprocess, time
+
+# Variables
+s_sessions = []
+failed_count = 0
+
+from sys import exit
+
+codeCodes = {
+        'black':        '0;30',         'bright gray':  '0;37',
+        'blue':         '0;34',         'white': '1;37',
+        'green':        '0;32',         'bright blue':  '1;34',
+        'cyan':         '0;36',         'bright green': '1;32',
+        'red':          '0;31',         'bright cyan':  '1;36',
+        'purple':       '0;35',         'bright red':   '1;31',
+        'yellow':       '0;33',         'bright purple':'1;35',
+        'dark gray':'1;30',             'bright yellow':'1;33',
+        'normal':       '0'
+}
+
+def printc(text, color):
+	"""Print in color."""
+	print("\033["+codeCodes[color]+"m"+text+"\033[0m")
+
+def writec(text, color):
+	"""Write to stdout in color."""
+	sys.stdout.write("\033["+codeCodes[color]+"m"+text+"\033[0m")
+
+def switchColor(color):
+	"""Switch console color."""
+	sys.stdout.write("\033["+codeCodes[color]+"m")
+
+
+def question():
+	global fibre_present, iscsi_present
+	### Ask Question to ensure they really want to rescan
+	if (fibre_present == True and iscsi_present == True): 
+		print("| RESCAN all (Fibre and iSCSI) connections!                                          |")
+	elif (fibre_present == True and iscsi_present == False):
+		print("| RESCAN all (Fibre) Connections!                                                    |")
+	elif (fibre_present == False and iscsi_present == True):
+		print("| RESCAN for all (iSCSI) Connections!                                                |")
+	
+	print("|====================================================================================|")
+	answer = raw_input("Continue? [Type 'yes','no']: ").rstrip()
+	answer = answer.lstrip()
+
+	if(answer !="yes"):
+		print("Aborting command..")
+        	exit(0)
+
+	print("\n")
+
+def runcmd(cmd):
+        args = shlex.split(cmd)
+        getoutput = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = getoutput.stdout.readlines()
+        getoutput.wait()
+        cmdoutput = getoutput.communicate()
+        cmdoutput_stdout = cmdoutput[0]
+        cmdoutput_stderr = cmdoutput[1]
+        returncode_plun = getoutput.returncode
+        return output, cmdoutput_stderr, returncode_plun
+
+def middle(string):
+        mstr = string[len(string) // 2]
+        return mstr
+
+def getluns(file,state):
+	
+	## Define Luns
+	outluns = []
+
+	if(state == "pre"):
+		commands.getstatusoutput('/sbin/multipath -ll > /tmp/rescan.pre')  
+	else:
+		commands.getstatusoutput('/sbin/multipath -ll > /tmp/rescan.post')  
+
+        mpathdevcount = 0
+        ## Actual work to get LUNS
+        plun = subprocess.Popen(["grep","mpath",file], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        luns_output = plun.stdout.readlines()
+        plun.wait()
+        output_plun, errors_plun = plun.communicate()
+        returncode_plun = plun.returncode
+
+        for luns in luns_output:
+                luns_split = luns.split()
+                mpath_device = luns_split[0]
+                mpathdevcount += 1
+		outluns.append(mpath_device)
+
+        if(state == "pre"):
+		print(" [ LUNS before rescan = ",mpathdevcount, "]")
+	else:
+		print(" [ LUNS after rescan = ",mpathdevcount,"]")
+
+        return outluns
+
+def get_iscsisessions():
+        global iscsi_sessions
+        print("Scanning for iSCSI Sessions ... ",end='')
+        i_return = runcmd("iscsiadm -m session")
+        iscsi_sessions = i_return[0]
+        errors = i_return[1]
+        returncode = i_return[2]
+
+        ## Get iSCSI Session Counts 
+        iscsi_sessions_count = len(iscsi_sessions)
+        print(" [ Active Sessions = ",iscsi_sessions_count," ]")
+
+        ## Get iSCSI Sessions if any and rescan them
+        if (returncode == 1):
+                print( "Error: ")
+                print("\tAn error has occured, message is:")
+                print(errors)
+                exit(1)
+
+        return iscsi_sessions_count
+
+def readfile(file):
+        f = open(file)
+        data = f.read().strip('\n\r')
+        f.close()
+        return data
+
+def iscsi_rescan():
+        # Get Global Variables
+        global iscsi_sessions
+
+        # Set Variables
+        failed_count = 0
+
+        # Take Output and Loop through to get session ID numbers
+        for sessions in iscsi_sessions:
+                s_split = sessions.split()
+                s_session = s_split[1]
+		
+		## Remove [] characters
+		s_session = s_session.replace("[","")
+		s_session = s_session.replace("]","")
+                s_sessions.append(s_session)
+
+        # Now that we have session IDs in list loop through list to rescan interface
+        for cur_session in s_sessions:
+
+                print("Rescanning Session [",cur_session,"] .... ",end='')
+	        cmd = "/sbin/iscsiadm --mode session -r " + cur_session + " --rescan "
+
+                p1 = runcmd(cmd)
+                rescan_output = p1[0]
+                errors_p1 = p1[1]
+                returncode_p1 = p1[2]
+
+                if (returncode_p1 == 0):
+                        writec(" OK \n", 'bright cyan')
+                else:
+                        print(" FAILED ")
+                        failed_sessions = True
+                        failed_count += 1
+
+                ## print cur_session, " output : "
+                ## print "output: ", rescan_output 
+                ## print "return_code: ", returncode_p1
+
+
+                ## print  "Found a total of ", s_sessions, " sessions. "
+
+        if (failed_count >= 1):
+                print("Warning: iSCSI Session Rescan failed on ",failed_count, "sessions")
+                print("Exiting to prevent any problems... Notify Sr Linux Admin immediately!!")
+                exit(1)
+
+def fiber_rescan():
+
+	print("Scanning for Fiber Sessions ... ",end='')
+
+	# Variables
+	directory = "/sys/class/fc_host/"
+	valid_host_port = []
+
+  	# Determine if Fiber Channel Even exists if not exit
+	fiberexists = os.path.isdir(directory)
+	if fiberexists == False:
+		print(" No Fiber Found ")
+		return
+
+	fchostdir = os.listdir(directory)
+	for fbhost in fchostdir:
+
+        	## Determine if Port is active if so create list
+       		port_state = readfile('/sys/class/fc_host/'+fbhost+'/port_state')
+        	speed = readfile('/sys/class/fc_host/'+fbhost+'/speed')
+        	port_type = readfile('/sys/class/fc_host/'+fbhost+'/port_type')
+
+        	if(port_state=="Online" and port_type=="NPort (fabric via point-to-point)"):
+
+                	## Create Variable of matching interfaces
+                	valid_host_port.append(fbhost)
+
+	port_len = len(valid_host_port)
+        print(" [ Active Ports = ",port_len," ]")
+
+	if (port_len > 0):
+
+       		## Now we have valid hosts lets rescan the ports
+       		for ports in valid_host_port:
+               		cmd = "echo \"1\" > /sys/class/fc_host/" + ports + "/issue_lip"
+
+
+            		print("Rescanning Fiber Port  [",ports,"] .... ",end='')
+			output = commands.getstatusoutput(cmd)
+			returncode_p1 = output[0]
+
+                	if (returncode_p1 == 0):
+                        	writec(" OK ",'bright cyan')
+				print("")
+                	else:
+                        	print(" FAILED ")
+                        	failed_sessions = True
+                        	failed_count += 1
+
+
+def mpath_restart():
+	print("Restart Multipath Daemon ... ",end='')
+	cmd = "/sbin/service multipathd restart"
+	p1 = runcmd(cmd)
+        rescan_output = p1[0]
+        errors_p1 = p1[1]
+        returncode_p1 = p1[2]
+
+        if (returncode_p1 == 0):
+		print(" OK ")
+	else:
+ 		print(" FAILED ")
+		failed_sessions = True
+ 		failed_count += 1
+
+def getdifference(pre,post):
+	
+	differences = []
+
+	for list in post:
+		if list not in pre:
+			differences.append(list)
+
+
+	difflength = len(differences)
+	print("New LUNS found after rescan:")
+	
+	if (difflength == 0):
+		writec("\tNo new LUNS found!!!",'white')
+		print("")
+	
+	if (difflength > 0):
+		for newlun in differences:
+			writec("\t/dev/mapper/" + newlun + '\n','white')
+
+def preflight():
+	global fibre_present, iscsi_present
+	## Detect if We have Fiber and iSCSI
+
+	####  Detect if Fibre present 
+        directory = "/sys/class/fc_host/"
+
+        # Determine if Fiber Channel Even exists if not exit
+        fiberexists = os.path.isdir(directory)
+        if fiberexists == False:
+		print("\t\t:fibre_cards => false")
+                fibre_present = False
+	else:
+		print("\t\t:fibre_cards => true")
+		fibre_present = True
+
+	####  Detect if iSCSI Present
+	out, error, retcode = runcmd("/bin/rpm -qa iscsi-initiator-utils")
+	outlen = len(out) 		
+	if outlen > 0:
+		print("\t\t:iscsi_proto => true")
+		iscsi_present = True
+	elif outlen == 0:
+		print("\t\t:iscsi_proto => false")
+		iscsi_present = False
+
+	print("")
+	print("|====================================================================================|")
+
+
+
+## *********** Actual Start of Script - Main Function ****************
+
+print("\n")
+print("|================================: RESCAN [v0.1.6] :=================================|")
+print(" ")
+
+preflight()
+
+## Ask Question
+question()
+
+## Grab LUN (pre) configuration to compare after rescan
+print("Grabbing LUN Configuration .... ",end='')
+pre = getluns('/tmp/rescan.pre','pre')
+
+if (fibre_present == True):
+	#### Fiber Checks
+	fiber_rescan()
+	time.sleep(4)
+
+if (iscsi_present == True):
+	#### iSCSI checks 
+	count_iscsi = get_iscsisessions()
+	if (count_iscsi > 0):
+        	iscsi_rescan()
+	time.sleep(4)
+
+#### Restart Multipath
+mpath_restart()
+time.sleep(4)
+
+## Grab LUN (post) configuration to compare after rescan
+print("Grabbing LUN Configuration .... ",end='')
+post = getluns('/tmp/rescan.post','post')
+
+
+## Differences
+print("\n")
+diff = getdifference(pre,post)
+print("\n")
+
+### END of script ####
+
